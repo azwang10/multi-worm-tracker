@@ -98,7 +98,7 @@ def faster_get_worms(tif_path, norm_mask, thresh, sigma, area_range, ecc_range, 
 	output = measure.label(output > thresh)
 	props = pd.DataFrame(measure.regionprops_table(output, properties=['area', 'centroid', 'eccentricity']))
 	worm_indexes = np.all([props['area'] > area_range[0], props['area'] < area_range[1],
-						   props['eccentricity'] > ecc_range[0], props['eccentricity'] < ecc_range[1]], axis=0)
+							props['eccentricity'] > ecc_range[0], props['eccentricity'] < ecc_range[1]], axis=0)
 	worm_df = props.iloc[worm_indexes]
 	return worm_df
 
@@ -110,12 +110,15 @@ def detect_worms(scratch_dir, mask, thresh, sigma, area_range, ecc_range, img_me
 
 	def parallel(tif_path):
 		num = name_from_path(tif_path)
+		out_path = os.path.join(worm_dir, num + '.csv')
+		if os.path.isfile(out_path):
+			return
 		worm_df = faster_get_worms(tif_path, norm_mask, thresh, sigma, area_range, ecc_range, img_mean)
 		out = pd.DataFrame()
 		out['frame'] = [int(num)] * len(worm_df)
 		out[['x', 'y']] = worm_df[['centroid-1', 'centroid-0']].round(2).to_numpy()
 		out['id'] = range(len(out))
-		out.to_csv(os.path.join(worm_dir, num + '.csv'), index=False)
+		out.to_csv(out_path, index=False)
 
 	tif_dir = os.path.join(scratch_dir, 'tif')
 	tif_list = sorted(glob(os.path.join(tif_dir, '*.tif')))
@@ -230,16 +233,16 @@ def plot_tracks(scratch_dir, mask):
 	trimmed_df = pd.read_csv(trimmed_path)
 	plt.figure(figsize=(5, 5))
 	plt.imshow(mask, cmap='Greys_r')
-	plt.scatter(trimmed_df['x'], trimmed_df['y'], c=trimmed_df['id'], cmap='tab20', s=0.5, lw=0)
+	plt.scatter(trimmed_df['x'], trimmed_df['y'], c=trimmed_df['id'] % 20, cmap='tab20', s=0.5, lw=0)
 	plt.axis('off'); plt.tight_layout()
 	plt.savefig(os.path.join(scratch_dir, 'tracks.png'), dpi=300)
 
 #first used in cell 11
 def save_params(scratch_dir, thresh, sigma, area_range, ecc_range, img_mean, seperation, min_frames_seen, min_area_traveled):
-    index = ['THRESHOLD', 'SIGMA', 'AREA_RANGE', 'ECCENTRICITY_RANGE', 'IMAGE_MEAN', 'SEPERATION', 'MIN_FRAMES_SEEN', 'MIN_AREA_TRAVELED']
-    data = [thresh, sigma, area_range, ecc_range, img_mean, seperation, min_frames_seen, min_area_traveled]
-    df = pd.DataFrame(data, index=index)
-    df.to_csv(os.path.join(scratch_dir, 'params.csv'), header=False, sep='\t')
+	index = ['THRESHOLD', 'SIGMA', 'AREA_RANGE', 'ECCENTRICITY_RANGE', 'IMAGE_MEAN', 'SEPERATION', 'MIN_FRAMES_SEEN', 'MIN_AREA_TRAVELED']
+	data = [thresh, sigma, area_range, ecc_range, img_mean, seperation, min_frames_seen, min_area_traveled]
+	df = pd.DataFrame(data, index=index)
+	df.to_csv(os.path.join(scratch_dir, 'params.csv'), header=False, sep='\t')
 
 #first used in cell 11
 def copy_to_output(input_avi, output_path, scratch_dir):
