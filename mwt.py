@@ -19,7 +19,10 @@ def make_scratch_dir(input_avi, scratch_path):
 	return scratch_dir
 
 #first used in cell 4
-def make_mask(input_avi, scratch_dir, frame_lim):
+def make_mask(input_avi, scratch_dir, frame_lim=None):
+	mask_path = os.path.join(scratch_dir, 'mask.tif')
+	if os.path.isfile(mask_path):
+		return io.imread(mask_path)
 	minute_dir = os.path.join(scratch_dir, 'minute')
 	os.makedirs(minute_dir, exist_ok=True)
 	os.system("ffmpeg -hide_banner -i '%s' -vf select='not(mod(n\,180))' -vsync vfr -pix_fmt gray '%s/%%06d.tif'"
@@ -242,7 +245,7 @@ def save_params(scratch_dir, thresh, sigma, area_range, ecc_range, img_mean, sep
 	index = ['THRESHOLD', 'SIGMA', 'AREA_RANGE', 'ECCENTRICITY_RANGE', 'IMAGE_MEAN', 'SEPERATION', 'MIN_FRAMES_SEEN', 'MIN_AREA_TRAVELED']
 	data = [thresh, sigma, area_range, ecc_range, img_mean, seperation, min_frames_seen, min_area_traveled]
 	df = pd.DataFrame(data, index=index)
-	df.to_csv(os.path.join(scratch_dir, 'params.csv'), header=False, sep='\t')
+	df.to_csv(os.path.join(scratch_dir, 'params.txt'), header=False, sep='\t')
 
 #first used in cell 11
 def copy_to_output(input_avi, output_path, scratch_dir):
@@ -250,7 +253,7 @@ def copy_to_output(input_avi, output_path, scratch_dir):
 	output_dir = os.path.join(output_path, exp_name)
 	os.makedirs(output_dir, exist_ok=True)
 	os.system('cp %s/trimmed_tracks.csv %s/%s_trimmed_tracks.csv' % (scratch_dir, output_dir, exp_name))
-	os.system('cp %s/params.csv %s/%s_params.csv' % (scratch_dir, output_dir, exp_name))
+	os.system('cp %s/params.txt %s/%s_params.txt' % (scratch_dir, output_dir, exp_name))
 	os.system('cp %s/mask.tif %s/%s_mask.tif' % (scratch_dir, output_dir, exp_name))
 	os.system('cp %s/tracking_stats.png %s/%s_tracking_stats.png' % (scratch_dir, output_dir, exp_name))
 	os.system('cp %s/tracks.png %s/%s_tracks.png' % (scratch_dir, output_dir, exp_name))
