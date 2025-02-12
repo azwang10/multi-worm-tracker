@@ -1,225 +1,207 @@
-#edited on 8-23-24
 import os
 from glob import glob
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from skimage import io, filters, measure, util
+from skimage import io, morphology, measure
 from joblib import Parallel, delayed
+from scipy.spatial import ConvexHull
 plt.rcParams['font.sans-serif'] = 'Arial'
 
-#first used in cell 3
 name_from_path = lambda name: os.path.splitext(os.path.basename(name))[0]
 
-#first used in cell 3
 def make_scratch_dir(input_avi, scratch_path):
+	if not os.path.isfile(input_avi):
+		raise FileNotFoundError()
 	exp_name = name_from_path(input_avi)
-	scratch_dir = os.path.join(scratch_path, exp_name + '-scratch')
+	scratch_dir = os.path.join(scratch_path, exp_name + '-scratch/')
 	os.makedirs(scratch_dir, exist_ok=True)
 	return scratch_dir
 
-#first used in cell 4
-def make_mask(input_avi, scratch_dir, frame_lim=None):
-	mask_path = os.path.join(scratch_dir, 'mask.tif')
+def make_mask(input_avi, scratch_dir):
+	mask_path = scratch_dir + 'mask.tif'
 	if os.path.isfile(mask_path):
-		return io.imread(mask_path)
-	minute_dir = os.path.join(scratch_dir, 'minute')
-	os.makedirs(minute_dir, exist_ok=True)
-	os.system("ffmpeg -hide_banner -i '%s' -vf select='not(mod(n\,180))' -vsync vfr -pix_fmt gray '%s/%%06d.tif'"
-			  % (input_avi, minute_dir))
-	if frame_lim == None:
-		every_min = np.array([io.imread(i) for i in sorted(glob('%s/*.tif' % minute_dir))])
+		mask = io.imread(mask_path)
 	else:
-		every_min = np.array([io.imread(i) for i in sorted(glob('%s/*.tif' % minute_dir))[:frame_lim//180]])
-	mask = np.median(every_min, axis=0).astype(np.ubyte)
-	io.imsave(os.path.join(scratch_dir, 'mask.tif'), mask)
-	return mask
+		minute_dir = scratch_dir + 'minute/'
+		os.makedirs(minute_dir, exist_ok=True)
 
-#first used in cell 4
-def get_and_show_mask(scratch_dir):
-	mask = io.imread(os.path.join(scratch_dir, 'mask.tif'))
+		#extracts a frame at each minute interval from the recording and saves it to minute_dir
+		os.system(f"ffmpeg -hide_banner -i '{input_avi}' -vf select='not(mod(n\,180))' -fps_mode vfr -pix_fmt gray '{minute_dir}%06d.tif'")
+		minute_arr = np.array([io.imread(i) for i in sorted(glob(f'{minute_dir}*.tif'))])
+		mask = np.median(minute_arr, axis=0).astype(np.ubyte)
+		io.imsave(mask_path, mask)
 	plt.imshow(mask, cmap='Greys_r', vmin=0, vmax=255)
 	return mask
 
-#first used in cell 5
-normalize_mask = lambda mask, img_mean: mask / np.mean(mask) * img_mean
+def guess_threshold(scratch_dir, mask, threshold_guesses=range(2, 11), size_range=(50, 150)):
 
-#first used in cell 5
-def get_worms(tif_path, norm_mask, thresh, sigma, area_range, ecc_range, img_mean):
-	tif = io.imread(tif_path)
-	diff_frame = (norm_mask - (tif / np.mean(tif) * img_mean))
-	filtered_frame = filters.gaussian(diff_frame, sigma=sigma, preserve_range=True)
-	label_img = measure.label(filtered_frame > thresh)
-	props = pd.DataFrame(measure.regionprops_table(label_img, properties=['area', 'centroid', 'eccentricity']))
-	worm_indexes = np.all([props['area'] > area_range[0], props['area'] < area_range[1],
-						   props['eccentricity'] > ecc_range[0], props['eccentricity'] < ecc_range[1]], axis=0)
-	worm_df = props.iloc[worm_indexes]
-	return filtered_frame, label_img, worm_df
+	#subtracts each frame from the mask for every minute and reshapes the stack to a single row
+	minute_paths = sorted(glob(scratch_dir + 'minute/*.tif'))
+	minute_stack = np.array([io.imread(minute_path) for minute_path in minute_paths])
+	mask_stack = np.tile(mask, (len(minute_paths), 1, 1))
+	diff_stack = mask_stack.astype(np.int16) - minute_stack.astype(np.int16)
+	diff_stack = np.clip(diff_stack, 0, 255).astype(np.ubyte)
+	long_stack = diff_stack.reshape(-1, diff_stack.shape[-1])
 
-#first used in cell 5
-def check_params(scratch_dir, mask, thresh, sigma, area_range, ecc_range, img_mean, rows=5, subplot_width=3):
-	norm_mask = normalize_mask(mask, img_mean)
-	fig, axs = plt.subplots(rows, 4, figsize=(subplot_width * 4, subplot_width * rows))
-	if rows == 1:
-		axs = np.expand_dims(axs, 0)
-	minute_dir = os.path.join(scratch_dir, 'minute')
-	minute_list = sorted(glob(os.path.join(minute_dir, '*.tif')))
-	indexes = np.linspace(0, len(minute_list) - 1, rows).astype(int)
-	for i in range(rows):
-		tif_path = minute_list[indexes[i]]
-		diff_frame, label_img, worm_df = get_worms(tif_path, norm_mask, thresh, sigma, area_range, ecc_range, img_mean)
-		axs[i, 0].imshow(diff_frame, vmin=0, vmax=thresh)
-		axs[i, 0].set_ylabel('Frame %i' % ((indexes[i] + 1) * 180))
-		axs[i, 1].imshow(label_img > 0)
-		axs[i, 2].imshow(np.isin(label_img, worm_df.index + 1))
-		axs[i, 3].hist(worm_df['area'], label='%i blobs to %i worms' % (np.max(label_img), len(worm_df)))
-		axs[i, 3].axvline(100, linestyle='--', c='k')
-		axs[i, 3].set_xlim(area_range[0], area_range[1])
-		axs[i, 3].legend()
-		axs[i, 0].set_xticks([]); axs[i, 1].set_xticks([]); axs[i, 2].set_xticks([])
-		axs[i, 0].set_yticks([]); axs[i, 1].set_yticks([]); axs[i, 2].set_yticks([])
-	axs[0, 0].set_title('Mean subtracted and filtered frame')
-	axs[0, 1].set_title('Thresholded frame')
-	axs[0, 2].set_title('Probable worms')
-	axs[0, 3].set_title('Worm sizes')
-	plt.tight_layout()
+	#a function to quickly get the size for each blob, filtering out blobs less than the size_range minimum
+	def get_sizes(threshold):
+		thresholded_stack = morphology.remove_small_objects(long_stack > threshold, min_size=size_range[0])
+		labeled_stack = measure.label(thresholded_stack)
+		return np.bincount(labeled_stack[labeled_stack > 0])
 
-#first used in cell 6
-def convert_to_tif(input_avi, scratch_dir, frame_lim):
-	tif_dir = os.path.join(scratch_dir, 'tif')
+	#gets the threshold that produces blobs closest to median_size
+	desired_size = np.mean(size_range)
+	minute_sizes = np.array([np.median(get_sizes(threshold)) for threshold in threshold_guesses])
+	best_threshold = threshold_guesses[np.argmin(abs(minute_sizes - desired_size))]
+
+	#plots the histogram of sizes
+	sizes = get_sizes(best_threshold)
+	plt.title(f'Best Threshold = {best_threshold}')
+	plt.hist(sizes, bins=np.arange(0, 200))
+	plt.axvline(desired_size, c='k')
+	plt.axvline(size_range[0], c='k', linestyle='--'); plt.axvline(size_range[1], c='k', linestyle='--')
+	plt.ylabel('# of worms'); plt.xlabel('Sizes (px)')
+	return best_threshold
+
+def convert_to_tif(input_avi, scratch_dir):
+
+	#extracts every frame from the recording and saves it to tif_dir
+	tif_dir = scratch_dir + 'tif/'
 	os.makedirs(tif_dir, exist_ok=True)
-	if frame_lim == None:
-		os.system("ffmpeg -hide_banner -i '%s' -pix_fmt gray '%s/%%06d.tif'" % (input_avi, tif_dir))
-	else:
-		os.system("ffmpeg -hide_banner -i '%s' -pix_fmt gray -frames:v %i '%s/%%06d.tif'" % (input_avi, frame_lim, tif_dir))
+	os.system(f"ffmpeg -hide_banner -i '{input_avi}' -pix_fmt gray '{tif_dir}%06d.tif'")
+	print(f"Frames converted: {len(glob(tif_dir + '*.tif'))}")
 
-#first used in cell 5
-def faster_get_worms(tif_path, norm_mask, thresh, sigma, area_range, ecc_range, img_mean):
-	output = io.imread(tif_path)
-	output = (norm_mask - (output / np.mean(output) * img_mean))
-	output = filters.gaussian(output, sigma=sigma, preserve_range=True)
-	output = measure.label(output > thresh)
-	props = pd.DataFrame(measure.regionprops_table(output, properties=['area', 'centroid', 'eccentricity']))
-	worm_indexes = np.all([props['area'] > area_range[0], props['area'] < area_range[1],
-							props['eccentricity'] > ecc_range[0], props['eccentricity'] < ecc_range[1]], axis=0)
-	worm_df = props.iloc[worm_indexes]
-	return worm_df
-
-#first used in cell 7
-def detect_worms(scratch_dir, mask, thresh, sigma, area_range, ecc_range, img_mean):
-	norm_mask = normalize_mask(mask, img_mean)
-	worm_dir = os.path.join(scratch_dir, 'worms')
+def detect_worms(scratch_dir, mask, best_threshold, size_range=(50, 150), ecc_range=(0.5, 1)):
+	worm_dir = scratch_dir + 'worms/'
 	os.makedirs(worm_dir, exist_ok=True)
 
-	def parallel(tif_path):
-		num = name_from_path(tif_path)
-		out_path = os.path.join(worm_dir, num + '.csv')
-		if os.path.isfile(out_path):
+	#for each tif file, get_worms() subtracts the mask, thresholds, and finds worms in the right size range and saves their positions
+	def get_worms(tif_path):
+		num_str = name_from_path(tif_path)
+		worm_path = worm_dir + num_str + '.csv'
+		if os.path.isfile(worm_path):
 			return
-		worm_df = faster_get_worms(tif_path, norm_mask, thresh, sigma, area_range, ecc_range, img_mean)
+		diff_frame = mask.astype(np.int16) - io.imread(tif_path).astype(np.int16)
+		diff_frame = np.clip(diff_frame, 0, 255).astype(np.ubyte)
+		thresholded_frame = morphology.remove_small_objects(diff_frame > best_threshold, min_size=size_range[0])
+		labeled_frame = measure.label(thresholded_frame)
+		worm_df = pd.DataFrame(measure.regionprops_table(labeled_frame, properties=['area', 'centroid', 'eccentricity']))
+		worm_indexes = np.all([worm_df['area'] > size_range[0], worm_df['area'] < size_range[1],
+							   worm_df['eccentricity'] > ecc_range[0], worm_df['eccentricity'] < ecc_range[1]], axis=0)
+		worm_df = worm_df.iloc[worm_indexes]
+
+		#makes a new dataframe output that rounds positions and adds the frame number and worm number
 		out = pd.DataFrame()
-		out['frame'] = [int(num)] * len(worm_df)
+		out['frame'] = [int(num_str)] * len(worm_df)
 		out[['x', 'y']] = worm_df[['centroid-1', 'centroid-0']].round(2).to_numpy()
 		out['id'] = range(len(out))
-		out.to_csv(out_path, index=False)
+		out.to_csv(worm_path, index=False)
 
-	tif_dir = os.path.join(scratch_dir, 'tif')
-	tif_list = sorted(glob(os.path.join(tif_dir, '*.tif')))
-	Parallel(n_jobs=-1)(delayed(parallel)(i) for i in tif_list)
+	#runs in parallel for each tif file
+	tif_dir = scratch_dir + 'tif/'
+	tif_list = sorted(glob(tif_dir + '*.tif'))
+	Parallel(n_jobs=-1)(delayed(get_worms)(i) for i in tif_list)
 
-#first used in cell 7
-def plot_worms(scratch_dir):
-	worm_dir = os.path.join(scratch_dir, 'worms')
-	worm_list = sorted(glob(os.path.join(worm_dir, '*.csv')))
+	#plots the worms
+	worm_list = sorted(glob(worm_dir + '*.csv'))
 	plt.plot([len(pd.read_csv(i)) for i in worm_list])
 	plt.ylabel('Worms per frame'); plt.xlabel('Frame #')
 	plt.title('Untracked worms')
 
-#first used in cell 8
-def link_worms(scratch_dir, seperation):
-	track_dir = os.path.join(scratch_dir, 'tracks')
-	worm_dir = os.path.join(scratch_dir, 'worms')
-	os.makedirs(track_dir, exist_ok=True)
-	os.system('cd %s && tar -cf %s/worms.tar *.csv' % (worm_dir, scratch_dir))
-	os.system('tar -xf %s/worms.tar -C %s' % (scratch_dir, track_dir))
+def link_worms(scratch_dir, max_speed=0.6):
+	untrimmed_path = scratch_dir + 'untrimmed_tracks.csv'
+	if os.path.isfile(untrimmed_path):
+		pass
+	else:
+		worm_dir = scratch_dir + 'worms/'
+		os.system(f'cd {worm_dir} && zip -0 -r -q {scratch_dir}worms.zip *.csv')
+		track_dir = scratch_dir + 'tracks/'
+		os.makedirs(track_dir, exist_ok=True)
+		os.system(f'unzip -o -q {scratch_dir}worms.zip -d {track_dir}')
 
-	def link(index, track_list):
-		#renumbers ids so that all ids are unique
-		df1, df2 = pd.read_csv(track_list[index]), pd.read_csv(track_list[index+1])
-		ids1, ids2 = sorted(set(df1['id'])), sorted(set(df2['id']))
-		df1['id'] = df1['id'].replace(dict(zip(ids1, range(len(ids1)))))
-		df2['id'] = df2['id'].replace(dict(zip(ids2, range(len(ids1), len(ids1) + len(ids2)))))
+		#function to link two consecutive dfs in the track directory
+		seperation = max_speed / 3 * 24 #(speed mm/s) / (3 frame/s) * (24 frames/mm) 
+		def link(index, track_list):
 
-		#if one has no worms just ends
-		if len(df1) == 0 or len(df2) == 0:
+			#renumbers ids so that all ids are unique
+			df1, df2 = pd.read_csv(track_list[index]), pd.read_csv(track_list[index+1])
+			ids1, ids2 = sorted(set(df1['id'])), sorted(set(df2['id']))
+			df1['id'] = df1['id'].replace(dict(zip(ids1, range(len(ids1)))))
+			df2['id'] = df2['id'].replace(dict(zip(ids2, range(len(ids1), len(ids1) + len(ids2)))))
+
+			#if one has no worms just ends
+			if len(df1) == 0 or len(df2) == 0:
+				df = pd.concat([df1, df2])
+				df.to_csv(track_list[index], index=False)
+				os.remove(track_list[index+1])
+				return
+
+			#get last frame of first df and first frame of second df
+			sub_df1 = df1[df1['frame'] == np.max(df1['frame'])]
+			arr1 = np.array(sub_df1[['x', 'y']])
+			sub_df2 = df2[df2['frame'] == np.min(df2['frame'])]
+			arr2 = np.array(sub_df2[['x', 'y']])
+
+			#get a dict of ids to be replaced, every worm from the first df should only link to one worm of the second df
+			diff = arr1[:, np.newaxis, :] - arr2[np.newaxis, :, :]
+			D = np.sqrt(np.sum(diff ** 2, axis=2))
+			replace_dict = {}
+			while True:
+				if np.min(D) > seperation:
+					break
+				index2 = np.argmin(np.min(D, axis=0))
+				index1 = np.argmin(D[:, index2])
+				replace_dict[sub_df2['id'].iloc[index2]] = sub_df1['id'].iloc[index1]
+				D[index1], D[:, index2] = np.inf, np.inf
+			
+			#replaces ids and overwrites files
+			df2['id'] = df2['id'].replace(replace_dict)
 			df = pd.concat([df1, df2])
 			df.to_csv(track_list[index], index=False)
 			os.remove(track_list[index+1])
-			return
 
-		#get last frame of first df and first frame of second df
-		sub_df1 = df1[df1['frame'] == np.max(df1['frame'])]
-		arr1 = np.array(sub_df1[['x', 'y']])
-		sub_df2 = df2[df2['frame'] == np.min(df2['frame'])]
-		arr2 = np.array(sub_df2[['x', 'y']])
-
-		#get a dict of ids to be replaced, every worm from the first df should only link to one worm of the second df
-		diff = arr1[:, np.newaxis, :] - arr2[np.newaxis, :, :]
-		D = np.sqrt(np.sum(diff ** 2, axis=2))
-		replace_dict = {}
+		#runs link until only one df is left
 		while True:
-			if np.min(D) > seperation:
+			track_list = sorted(glob(track_dir + '*.csv'))
+			if len(track_list) == 1:
 				break
-			index2 = np.argmin(np.min(D, axis=0))
-			index1 = np.argmin(D[:, index2])
-			replace_dict[sub_df2['id'].iloc[index2]] = sub_df1['id'].iloc[index1]
-			D[index1], D[:, index2] = np.inf, np.inf
-		
-		#replaces ids and overwrites files
-		df2['id'] = df2['id'].replace(replace_dict)
-		df = pd.concat([df1, df2])
-		df.to_csv(track_list[index], index=False)
-		os.remove(track_list[index+1])
+			Parallel(n_jobs=-1)(delayed(link)(i, track_list) for i in range(0, (len(track_list) // 2) * 2, 2))
+		os.system(f'mv {track_list[0]} {untrimmed_path}')
+		os.rmdir(track_dir)
 
-	while True:
-		track_list = sorted(glob(os.path.join(track_dir, '*.csv')))
-		if len(track_list) == 1:
-			break
-		Parallel(n_jobs=-1)(delayed(link)(i, track_list) for i in range(0, (len(track_list) // 2) * 2, 2))
-	untrimmed_path = os.path.join(scratch_dir, 'untrimmed_tracks.csv')
-	os.system('mv %s %s' % (track_list[0], untrimmed_path))
-	os.rmdir(track_dir)
-
-#first used in cell 8
-def plot_untrimmed(scratch_dir):
-	untrimmed_path = os.path.join(scratch_dir, 'untrimmed_tracks.csv')
+	#plots all untrimmed tracks
 	untrimmed_df = pd.read_csv(untrimmed_path)
 	unique_values, counts = np.unique(untrimmed_df['id'], return_counts=True)
-	plt.hist(counts, bins = np.arange(0, np.max(counts), 10)); plt.yscale('log')
-	plt.xlabel('Length of track in frames'); plt.ylabel('Count'); plt.tight_layout()
+	plt.hist(counts, bins=np.arange(0, np.max(counts), 10)); plt.yscale('log')
+	plt.xlabel('Length of track in frames'); plt.ylabel('Count')
+	plt.title('Tracked worms')
 
-#first used in cell 9
-def trim_csv(scratch_dir, min_frames_seen, min_area_traveled):
-	untrimmed_path = os.path.join(scratch_dir, 'untrimmed_tracks.csv')
-	untrimmed_df = pd.read_csv(untrimmed_path)
-	trimmed_path = os.path.join(scratch_dir, 'trimmed_tracks.csv')
-	unique_values, counts = np.unique(untrimmed_df['id'], return_counts=True)
-	trimmed_df = untrimmed_df[np.isin(untrimmed_df['id'], unique_values[counts > min_frames_seen])]
-	bbox_area = lambda xs, ys: (np.max(xs) - np.min(xs)) * (np.max(ys) - np.min(ys))
-	ids_to_save = []
-	for i in sorted(set(trimmed_df['id'])):
-		x, y = trimmed_df[trimmed_df['id'] == i]['x'], trimmed_df[trimmed_df['id'] == i]['y']
-		if bbox_area(x, y) > min_area_traveled:
-			ids_to_save.append(i)
-	trimmed_df = trimmed_df[np.isin(trimmed_df['id'], ids_to_save)]
-	ids = sorted(set(trimmed_df['id']))
-	trimmed_df['id'] = trimmed_df['id'].replace(dict(zip(ids, range(len(ids)))))
-	trimmed_df.to_csv(trimmed_path, index=False)
+def trim_csv(scratch_dir, min_secs_tracked=30, min_area_tracked=2):
+	trimmed_path = scratch_dir + 'trimmed_tracks.csv'
+	if os.path.isfile(trimmed_path):
+		trimmed_df = pd.read_csv(trimmed_path)
+	else:
+	
+		#trims the df to only tracks that have been seen for more than min_secs_tracked
+		min_frames_tracked = 3 * min_secs_tracked
+		untrimmed_df = pd.read_csv(scratch_dir + 'untrimmed_tracks.csv')
+		unique_values, counts = np.unique(untrimmed_df['id'], return_counts=True)
+		trimmed_df = untrimmed_df[np.isin(untrimmed_df['id'], unique_values[counts > min_frames_tracked])]
 
-#first used in cell 9
-def plot_trimmed(scratch_dir):
-	trimmed_path = os.path.join(scratch_dir, 'trimmed_tracks.csv')
-	trimmed_df = pd.read_csv(trimmed_path)
+		#trims the df to only tracks that have traveled more than the min_area_tracked
+		min_px_tracked = min_area_tracked * 24 * 24 #conversion from mm^2 to px^2
+		ids_to_save = []
+		for i in sorted(set(trimmed_df['id'])):
+			pts = trimmed_df[trimmed_df['id'] == i][['x', 'y']].to_numpy()
+			if ConvexHull(pts).volume > min_px_tracked:
+				ids_to_save.append(i)
+		trimmed_df = trimmed_df[np.isin(trimmed_df['id'], ids_to_save)]
+		ids = sorted(set(trimmed_df['id']))
+		trimmed_df['id'] = trimmed_df['id'].replace(dict(zip(ids, range(len(ids)))))
+		trimmed_df.to_csv(trimmed_path, index=False)
+	
+	#plots the tracks
 	plt.subplot(211)
 	unique_values, counts = np.unique(trimmed_df['frame'], return_counts=True)
 	plt.plot(unique_values, counts)
@@ -230,30 +212,29 @@ def plot_trimmed(scratch_dir):
 	plt.xlabel('Length of track in frames'); plt.ylabel('Count'); plt.tight_layout()
 	plt.savefig(os.path.join(scratch_dir, 'tracking_stats.png'), dpi=300)
 
-#first used in cell 10
 def plot_tracks(scratch_dir, mask):
-	trimmed_path = os.path.join(scratch_dir, 'trimmed_tracks.csv')
-	trimmed_df = pd.read_csv(trimmed_path)
+	trimmed_df = pd.read_csv(scratch_dir + 'trimmed_tracks.csv')
 	plt.figure(figsize=(5, 5))
 	plt.imshow(mask, cmap='Greys_r')
 	plt.scatter(trimmed_df['x'], trimmed_df['y'], c=trimmed_df['id'] % 20, cmap='tab20', s=0.5, lw=0)
 	plt.axis('off'); plt.tight_layout()
-	plt.savefig(os.path.join(scratch_dir, 'tracks.png'), dpi=300)
+	plt.savefig(scratch_dir + 'tracks.png', dpi=300)
 
-#first used in cell 11
-def save_params(scratch_dir, thresh, sigma, area_range, ecc_range, img_mean, seperation, min_frames_seen, min_area_traveled):
-	index = ['THRESHOLD', 'SIGMA', 'AREA_RANGE', 'ECCENTRICITY_RANGE', 'IMAGE_MEAN', 'SEPERATION', 'MIN_FRAMES_SEEN', 'MIN_AREA_TRAVELED']
-	data = [thresh, sigma, area_range, ecc_range, img_mean, seperation, min_frames_seen, min_area_traveled]
+def save_output(input_avi, scratch_dir, output_path, best_threshold, size_range, ecc_range, max_speed, min_secs_tracked, min_area_tracked):
+
+	#makes a .txt of all the parameters used during analysis
+	index = ['THRESHOLD', 'SIZE_RANGE', 'ECCENTRICITY_RANGE', 'MAX_SPEED', 'MIN_SECS_TRACKED', 'MIN_AREA_TRACKED']
+	data = [best_threshold, size_range, ecc_range, max_speed, min_secs_tracked, min_area_tracked]
 	df = pd.DataFrame(data, index=index)
 	df.to_csv(os.path.join(scratch_dir, 'params.txt'), header=False, sep='\t')
 
-#first used in cell 11
-def copy_to_output(input_avi, output_path, scratch_dir):
+	#makes the output directory and copies all files to it
 	exp_name = name_from_path(input_avi)
-	output_dir = os.path.join(output_path, exp_name)
+	output_dir = os.path.join(output_path, exp_name + '/')
 	os.makedirs(output_dir, exist_ok=True)
-	os.system('cp %s/trimmed_tracks.csv %s/%s_trimmed_tracks.csv' % (scratch_dir, output_dir, exp_name))
-	os.system('cp %s/params.txt %s/%s_params.txt' % (scratch_dir, output_dir, exp_name))
-	os.system('cp %s/mask.tif %s/%s_mask.tif' % (scratch_dir, output_dir, exp_name))
-	os.system('cp %s/tracking_stats.png %s/%s_tracking_stats.png' % (scratch_dir, output_dir, exp_name))
-	os.system('cp %s/tracks.png %s/%s_tracks.png' % (scratch_dir, output_dir, exp_name))
+	os.system(f'cp {scratch_dir}trimmed_tracks.csv {output_dir}{exp_name}_trimmed_tracks.csv')
+	os.system(f'cp {scratch_dir}params.txt {output_dir}{exp_name}_params.txt')
+	os.system(f'cp {scratch_dir}mask.tif {output_dir}{exp_name}_mask.tif')
+	os.system(f'cp {scratch_dir}tracking_stats.png {output_dir}{exp_name}_tracking_stats.png')
+	os.system(f'cp {scratch_dir}tracks.png {output_dir}{exp_name}_tracks.png')
+
