@@ -66,6 +66,20 @@ def guess_threshold(scratch_dir, mask, threshold_guesses=range(2, 11), size_rang
 	plt.ylabel('# of worms'); plt.xlabel('Sizes (px)')
 	return best_threshold
 
+def double_check_threshold(scratch_dir, mask, best_threshold):
+    """Plots what the threshold looks like certain frames"""
+    minute_paths = sorted(glob(scratch_dir + 'minute/*.tif'))
+    indexes_to_plot = np.linspace(0, len(minute_paths) - 1, 10).astype(int)
+    fig, axs = plt.subplots(2, 5, figsize=(10, 4))
+    axs = axs.ravel()
+    for i in range(len(indexes_to_plot)):
+        minute = io.imread(minute_paths[i])
+        diff = mask.astype(np.int16) - minute.astype(np.int16)
+        axs[i].set_title(f'Minute: {indexes_to_plot[i]}')
+        axs[i].imshow(diff > best_threshold)
+        axs[i].axis('off')
+    plt.tight_layout()
+
 def convert_to_tif(input_avi, scratch_dir):
 	"""Extracts every frame from the recording and saves it to tif_dir"""
 	tif_dir = scratch_dir + 'tif/'
